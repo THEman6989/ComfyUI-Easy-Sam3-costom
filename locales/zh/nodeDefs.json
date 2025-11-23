@@ -288,5 +288,20 @@
         "tooltip": "叠加了彩色遮罩、边框和置信度分数的可视化图像"
       }
     }
+  },
+  "easy stringToBBox": {
+    "display_name": "字符串转边界框",
+    "inputs": {
+      "bbox_string": {
+        "name": "bbox_string",
+        "tooltip": "边界框坐标，格式：x1,y1,x2,y2（多个边界框用换行分隔）"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "bbox",
+        "tooltip": "解析后的 BBOX 格式边界框"
+      }
+    }
   }
 }

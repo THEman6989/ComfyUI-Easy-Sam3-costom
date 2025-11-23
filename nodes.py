@@ -326,7 +326,7 @@ class Sam3ImageSegmentation(io.ComfyNode):
                 # Handle empty results for this image
                 if masks is None or len(masks) == 0:
                     logger.warning(f"No masks detected for image {idx}, using empty mask")
-                    masks = torch.zeros(H, W)
+                    masks = torch.zeros(1, H, W)
                 else:
                     # Sort by scores (highest confidence first)
                     if scores is not None and len(scores) > 0:
@@ -342,7 +342,7 @@ class Sam3ImageSegmentation(io.ComfyNode):
 
                 if masks_tensor is None or len(masks_tensor) == 0:
                     logger.warning(f"Failed to convert masks for image {idx}, using empty mask")
-                    combined_mask = torch.zeros(H, W)
+                    combined_mask = torch.zeros(1, H, W)
                 else:
                     # Combine all masks for this image using logical OR (union of all detected objects)
                     # This creates a single mask that includes all detected objects
@@ -995,5 +995,92 @@ class Sam3Visualization(io.ComfyNode):
         
         # Return with preview UI
         return io.NodeOutput(output_images,)
+
+
+class StringToBBox(io.ComfyNode):
+    """Convert string coordinates to BBOX type."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="easy stringToBBox",
+            display_name="String to BBox",
+            category="EasyUse/Sam3",
+            description="Convert x1,y1,x2,y2 format string to BBOX type",
+            inputs=[
+                io.String.Input(
+                    "bbox_string",
+                    default="",
+                    multiline=True,
+                    tooltip="Bounding box coordinates in format: x1,y1,x2,y2 (one per line for multiple boxes)",
+                    force_input=True,
+                ),
+            ],
+            outputs=[
+                io.BBOX.Output(
+                    "bbox",
+                    display_name="bbox",
+                    tooltip="Parsed bounding box in BBOX format"
+                )
+            ]
+        )
+
+    @classmethod
+    def execute(cls, bbox_string) -> io.NodeOutput:
+        """
+        Convert string format bounding boxes to BBOX type.
+        
+        Args:
+            bbox_string: String containing bbox coordinates in format "x1,y1,x2,y2"
+                        Multiple boxes can be separated by newlines
+            
+        Returns:
+            List of bounding boxes in format [{'startX': x1, 'startY': y1, 'endX': x2, 'endY': y2}, ...]
+        """
+        if not bbox_string or not bbox_string.strip():
+            raise ValueError("Bounding box string cannot be empty")
+        
+        try:
+            # Split by newlines for multiple boxes
+            lines = [line.strip() for line in bbox_string.strip().split('\n') if line.strip()]
+            
+            bboxes = []
+            for idx, line in enumerate(lines):
+                # Split by comma
+                parts = [p.strip() for p in line.split(',')]
+                
+                if len(parts) != 4:
+                    raise ValueError(f"Line {idx + 1}: Expected 4 values (x1,y1,x2,y2), got {len(parts)}")
+                
+                try:
+                    x1, y1, x2, y2 = [float(p) for p in parts]
+                except ValueError as e:
+                    raise ValueError(f"Line {idx + 1}: Could not convert coordinates to numbers: {e}")
+                
+                # Validate coordinates
+                if x1 < 0 or y1 < 0 or x2 < 0 or y2 < 0:
+                    raise ValueError(f"Line {idx + 1}: Coordinates must be non-negative, got ({x1}, {y1}, {x2}, {y2})")
+                
+                if x1 >= x2:
+                    raise ValueError(f"Line {idx + 1}: x1 ({x1}) must be less than x2 ({x2})")
+                
+                if y1 >= y2:
+                    raise ValueError(f"Line {idx + 1}: y1 ({y1}) must be less than y2 ({y2})")
+                
+                # Create bbox in KJNodes format
+                bbox_dict = {
+                    'startX': x1,
+                    'startY': y1,
+                    'endX': x2,
+                    'endY': y2
+                }
+                bboxes.append(bbox_dict)
+            
+            logger.info(f"Parsed {len(bboxes)} bounding box(es) from string")
+            
+            return io.NodeOutput(bboxes)
+            
+        except Exception as e:
+            raise ValueError(f"Error parsing bounding box string: {str(e)}")
 
 
