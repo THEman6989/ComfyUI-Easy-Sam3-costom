@@ -303,28 +303,39 @@ def join_image_with_alpha(image: torch.Tensor, alpha: torch.Tensor, invert=False
 def parse_points(points_str, image_shape=None):
     """Parse point coordinates from JSON string and validate bounds.
     
+    Supports two formats:
+    1. {"points": [[x, y], ...], "labels": [1, 0, ...]} - Direct format with normalized coordinates
+    2. [{"x": x, "y": y}, ...] - Legacy format with pixel coordinates
+    
     Converts pixel coordinates to normalized coordinates (0-1 range) if image_shape is provided.
 
     Returns:
-        tuple: (points_array, labels_array, validation_errors) where validation_errors
-               is a list of error messages, or (None, None, errors) if all points invalid
+        tuple: (points_array, count) for format 1, or (points_array, count, validation_errors) for format 2
     """
     if not points_str or not points_str.strip():
         return None, None, []
 
     try:
-        points_list = json.loads(points_str)
+        parsed_data = json.loads(points_str)
 
-        if not isinstance(points_list, list):
-            raise ValueError(f"Points must be a JSON array, got {type(points_list).__name__}")
+        # Check if it's the new format with "points" and "labels" keys
+        if isinstance(parsed_data, dict) and "points" in parsed_data:
+            points = parsed_data["points"]
+            if not points:
+                return None, None
+            return points, len(points), []
+        
+        # Legacy format: list of point dictionaries
+        if not isinstance(parsed_data, list):
+            raise ValueError(f"Points must be a JSON array or object with 'points' key, got {type(parsed_data).__name__}")
 
-        if len(points_list) == 0:
+        if len(parsed_data) == 0:
             return None, None, []
 
         points = []
         validation_errors = []
 
-        for i, point_dict in enumerate(points_list):
+        for i, point_dict in enumerate(parsed_data):
             if not isinstance(point_dict, dict):
                 err = f"Point {i} is not a dictionary"
                 print(f"Warning: {err}, skipping")
@@ -385,20 +396,32 @@ def parse_points(points_str, image_shape=None):
 def parse_bbox(bbox, image_shape=None):
     """Parse bounding box from BBOX type (tuple/list/dict) and validate
     
-    Converts pixel coordinates to normalized coordinates (0-1 range) if image_shape is provided.
-
     Supports multiple formats:
-    - KJNodes: [{'startX': x, 'startY': y, 'endX': x2, 'endY': y2}, ...]
-    - Tuple/list: (x1, y1, x2, y2) or (x, y, width, height)
-    - Dict: {'startX': x, 'startY': y, 'endX': x2, 'endY': y2}
+    1. {"boxes": [[x, y, w, h], ...], "labels": [true/false, ...]} - Direct format with normalized coordinates
+    2. KJNodes: [{'startX': x, 'startY': y, 'endX': x2, 'endY': y2}, ...]
+    3. Tuple/list: (x1, y1, x2, y2) or (x, y, width, height)
+    4. Dict: {'startX': x, 'startY': y, 'endX': x2, 'endY': y2}
+    
+    Converts pixel coordinates to normalized coordinates (0-1 range) if image_shape is provided.
     
     Returns:
-        List of bounding boxes [[x1, y1, x2, y2], ...] in normalized coordinates (0-1) if image_shape provided, or None
+        tuple: (boxes_array, count) for all formats
     """
     if bbox is None:
-        return None
+        return None, 0
 
     try:
+        # Check if it's a string that needs to be parsed as JSON
+        if isinstance(bbox, str):
+            bbox = json.loads(bbox)
+        
+        # Check if it's the new format with "boxes" and "labels" keys
+        if isinstance(bbox, dict) and "boxes" in bbox:
+            boxes = bbox["boxes"]
+            if not boxes:
+                return None, 0
+            return boxes, len(boxes)
+        
         all_coords = []
 
         # Try to extract coordinates regardless of type checks
@@ -408,7 +431,7 @@ def parse_bbox(bbox, image_shape=None):
             try:
                 bbox_list = list(bbox)
                 if len(bbox_list) == 0:
-                    return None
+                    return None, 0
 
                 # Check if it's a list of 4 numbers (single bbox)
                 if len(bbox_list) == 4 and all(isinstance(x, (int, float)) for x in bbox_list):
@@ -510,6 +533,8 @@ def parse_bbox(bbox, image_shape=None):
 
         return validated_coords, len(validated_coords)
 
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in bbox: {str(e)}")
     except (ValueError, TypeError) as e:
         error_msg = f"Invalid bbox: {str(e)}\n"
         error_msg += f"Input type: {type(bbox)}\n"
