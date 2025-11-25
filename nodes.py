@@ -304,32 +304,79 @@ class Sam3ImageSegmentation(io.ComfyNode):
                 # Set single image in processor
                 state = processor.set_image(pil_img)
 
-                # text prompt
+                # Split text prompts by comma and process each one
                 prompt_text = prompt.strip()
+                text_prompts = []
                 if prompt_text:
-                    state = processor.set_text_prompt(prompt_text, state)
+                    # Split by comma to support multiple prompts
+                    text_prompts = [p.strip() for p in prompt_text.split(',') if p.strip()]
+                
+                # Collect masks, boxes, scores from all prompts
+                all_masks = []
+                all_boxes = []
+                all_scores = []
+                
+                # Process text prompts
+                if len(text_prompts) > 0:
+                    logger.info(f"Processing {len(text_prompts)} text prompt(s)")
+                    for prompt_idx, single_prompt in enumerate(text_prompts):
+                        # Reset state for each prompt
+                        prompt_state = processor.set_image(pil_img)
+                        prompt_state = processor.set_text_prompt(single_prompt, prompt_state)
+                        
+                        # Get results for this prompt
+                        prompt_masks = prompt_state.get('masks', None)
+                        prompt_boxes = prompt_state.get('boxes', None)
+                        prompt_scores = prompt_state.get('scores', None)
+                        
+                        if prompt_masks is not None and len(prompt_masks) > 0:
+                            all_masks.append(prompt_masks)
+                            all_boxes.append(prompt_boxes)
+                            all_scores.append(prompt_scores)
+                            logger.info(f"Prompt '{single_prompt}': detected {len(prompt_masks)} object(s)")
+                
+                # Process points, bbox, mask prompts (if no text prompts were provided)
+                if len(text_prompts) == 0:
+                    # points
+                    if points is not None and len(points) > 0:
+                        logging.info(f"Processing {len(points)} points")
+                        state = processor.add_point_prompt(points, point_labels, state)
+                    # bbox
+                    if bounding_boxes is not None and len(bounding_boxes) > 0:
+                        logger.info("Adding %d bounding box(es) as prompt", len(bounding_boxes))
+                        state = processor.add_boxes_prompts(bounding_boxes, bounding_box_labels, state)
+                    # mask
+                    if mask is not None:
+                        state = processor.add_mask_prompt(mask, state)
+                    
+                    # Get results
+                    prompt_masks = state.get('masks', None)
+                    prompt_boxes = state.get('boxes', None)
+                    prompt_scores = state.get('scores', None)
+                    
+                    if prompt_masks is not None and len(prompt_masks) > 0:
+                        all_masks.append(prompt_masks)
+                        all_boxes.append(prompt_boxes)
+                        all_scores.append(prompt_scores)
 
-                # points
-                if points is not None and len(points) > 0:
-                    logging.info(f"Processing {len(points)} points")
-                    state = processor.add_point_prompt(points, point_labels, state)
-                # bbox
-                if bounding_boxes is not None and len(bounding_boxes) > 0:
-                    logger.info("Adding %d bounding box(es) as prompt", len(bounding_boxes))
-                    state = processor.add_boxes_prompts(bounding_boxes, bounding_box_labels, state)
-                # mask
-                if mask is not None:
-                    state = processor.add_mask_prompt(mask, state)
-
-                # Get the masks and scores for this image
-                masks = state.get('masks', None)
-                boxes = state.get('boxes', None)
-                scores = state.get('scores', None)
+                # Combine results from all prompts
+                if len(all_masks) > 0:
+                    masks = torch.cat(all_masks, dim=0)
+                    boxes = torch.cat(all_boxes, dim=0)
+                    scores = torch.cat(all_scores, dim=0)
+                else:
+                    masks = None
+                    boxes = None
+                    scores = None
 
                 # Handle empty results for this image
                 if masks is None or len(masks) == 0:
                     logger.warning(f"No masks detected for image {idx}, using empty mask")
                     masks = torch.zeros(1, H, W)
+                    if boxes is None or len(boxes) == 0:
+                        boxes = torch.zeros(1, 4)
+                    if scores is None or len(scores) == 0:
+                        scores = torch.zeros(1)
                 else:
                     # Sort by scores (highest confidence first)
                     if scores is not None and len(scores) > 0:

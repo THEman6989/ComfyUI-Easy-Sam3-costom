@@ -22,7 +22,8 @@ This node package brings Meta's SAM3 model to ComfyUI, enabling:
 ## Features
 
 - 🖼️ **Image Segmentation**: Segment objects using natural language prompts
-- 🎬 **Video Segmentation**: Track objects across video frames with consistent IDs
+- �️ **Multi-Category Segmentation**: Support for comma-separated prompts to segment different object categories in a single image (e.g., "cat, dog, person")
+- �🎬 **Video Segmentation**: Track objects across video frames with consistent IDs
 - 🎨 **Background Options**: Add custom backgrounds (black, white, grey) to segmented images
 - ⚙️ **Flexible Configuration**: Support for different devices (CUDA, CPU, MPS) and precisions (fp32, fp16, bf16)
 - 🔧 **Advanced Controls**: Comprehensive video tracking parameters for fine-tuning
@@ -48,7 +49,7 @@ Segment objects in images using text prompts and optional geometric prompts.
 **Inputs:**
 - `sam3_model`: SAM3 model from Load SAM3 Model node (must be in 'image' mode)
 - `images`: Input images to segment
-- `prompt`: Text description of objects to segment (e.g., "a cat", "person"). Supports empty string for point/box only segmentation
+- `prompt`: Text description of objects to segment (e.g., "a cat", "person"). Supports comma-separated prompts to segment multiple object categories (e.g., "cat, dog, person"). Also supports empty string for point/box only segmentation
 - `threshold`: Confidence threshold for detections (0.0-1.0, step: 0.05, default: 0.40)
 - `keep_model_loaded`: Keep model in VRAM after inference (default: False)
 - `add_background`: Add background color to segmented images (options: none, black, white, grey, default: none)
