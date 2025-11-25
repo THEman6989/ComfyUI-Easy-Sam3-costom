@@ -711,7 +711,8 @@ class Sam3VideoSegmentation(io.ComfyNode):
                 "obj_ids":None,
                 "obj_masks":None
             }
-            object_masks = []
+            # Use dictionary to store object_masks by frame_idx to handle non-sequential frame processing
+            object_masks_dict = {}
 
             for response in video_predictor.handle_stream_request(
                 request=dict(
@@ -732,17 +733,17 @@ class Sam3VideoSegmentation(io.ComfyNode):
                         mask = outputs["out_binary_masks"]
                         object_outputs["obj_masks"] = mask
                         if mask.shape[0] > 0:
-                            # Convert mask to tensor and append to object_masks list
+                            # Convert mask to tensor and store by frame_idx
                             mask_tensor = torch.from_numpy(mask).float()
-                            object_masks.append(mask_tensor)
+                            object_masks_dict[frame_idx] = mask_tensor
                             
                             merged_mask = np.any(mask, axis=0).astype(np.float32)
                             frame_masks = torch.from_numpy(merged_mask)
                             output_masks[frame_idx] = frame_masks
                         else:
-                            object_masks.append(torch.zeros((1, H, W)))
+                            object_masks_dict[frame_idx] = torch.zeros((1, H, W))
                     else:
-                        object_masks.append(torch.zeros((1, H, W)))
+                        object_masks_dict[frame_idx] = torch.zeros((1, H, W))
 
                 # Update progress bar
                 processed_frames += 1
@@ -766,8 +767,17 @@ class Sam3VideoSegmentation(io.ComfyNode):
             if not keep_model_loaded and close_after_propagation:
                 video_predictor.shutdown()
 
-        # Pad object_masks to have the same number of objects across all frames
-        if len(object_masks) > 0:
+        # Convert object_masks_dict to ordered list and pad to have same number of objects across all frames
+        if len(object_masks_dict) > 0:
+            # Create ordered list of masks by frame index
+            object_masks = []
+            for frame_idx in range(B):
+                if frame_idx in object_masks_dict:
+                    object_masks.append(object_masks_dict[frame_idx])
+                else:
+                    # Frame not processed, add empty mask
+                    object_masks.append(torch.zeros((1, H, W)))
+            
             # Find the maximum number of objects across all frames
             max_num_objects = max(mask.shape[0] for mask in object_masks)
             
