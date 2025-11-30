@@ -440,6 +440,7 @@ class Sam3ImageSegmentation(io.ComfyNode):
                 pbar.update_absolute(processed_frames, num_frames)
 
             output_masks = torch.stack(output_masks, dim=0)
+            output_images = torch.stack(output_images, dim=0)
             output_boxes = torch.stack(output_boxes, dim=0)
             output_scores = torch.stack(output_scores, dim=0)
             output_raw_masks = torch.stack(output_raw_masks, dim=0)
