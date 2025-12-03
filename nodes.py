@@ -1490,17 +1490,13 @@ class FramesEditor(io.ComfyNode):
                             w = i['w']
                             h = i['h']
                         bboxes.append([x, y, x + w, y + h])
-                
+
                 # Convert to JSON strings
                 if positive_coords is not None:
                     positive_coords = json.dumps(positive_coords, ensure_ascii=False)
                 if negative_coords is not None:
                     negative_coords = json.dumps(negative_coords, ensure_ascii=False)
-                if len(bboxes) > 0:
-                    bboxes = json.dumps(bboxes, ensure_ascii=False)
-                else:
-                    bboxes = None
-        
+
         # Prepare images for preview (scale down if needed)
         preview_images = images
         if needs_scaling:
