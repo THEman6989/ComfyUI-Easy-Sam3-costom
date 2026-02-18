@@ -1606,3 +1606,503 @@ class FramesEditor(io.ComfyNode):
             is_init = True
 
         return io.NodeOutput(positive_coords, negative_coords, bboxes, frame_index, ui={"preview": [{"preview_str": preview_str, "is_init": is_init}]})
+
+
+
+class Sam3VideoSegmentation_v2(io.ComfyNode):
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="easy sam3VideoSegmentation_v2",
+            display_name="SAM3 Video Segmentation v2",
+            category="EasyUse/Sam3",
+            description="Track and segment objects across video frames using SAM3 (Version 2 with Multi-Box Support)",
+            inputs=[
+                io.Custom(io_type="EASY_SAM3_MODEL").Input(
+                    "sam3_model",
+                    display_name="SAM3 Model",
+                    tooltip="SAM3 model loaded from LoadSam3Model node (must be video mode)"
+                ),
+                io.String.Input(
+                    "session_id",
+                    default=None,
+                    force_input=True,
+                    optional=True,
+                ),
+                io.Image.Input(
+                    "video_frames",
+                    tooltip="Video frames as image sequence"
+                ),
+                io.String.Input(
+                    "prompt",
+                    default="",
+                    multiline=True,
+                    tooltip="Text description of objects to track (e.g., 'person', 'car')"
+                ),
+                io.Int.Input(
+                    "frame_index",
+                    min=0,
+                    max=10 ** 5,
+                    step=1,
+                    tooltip="Frame where initial prompt is applied",
+                ),
+                io.Int.Input(
+                    "object_id",
+                    default=1,
+                    min=1,
+                    max=1000,
+                    step=1,
+                    tooltip="Unique ID for multi-object tracking (starting ID if individual_objects is True)"
+                ),
+                io.Float.Input(
+                    "score_threshold_detection",
+                    default=0.5,
+                    min=0.0,
+                    max=1.0,
+                    step=0.05,
+                    tooltip="Confidence threshold for detections, default is 0.5"
+                ),
+                io.Float.Input(
+                    "new_det_thresh",
+                    default=0.7,
+                    min=0.0,
+                    max=1.0,
+                    step=0.05,
+                    tooltip="Threshold for a detection to be added as a new object, default is 0.7"
+                ),
+                io.Combo.Input(
+                    "propagation_direction",
+                    options=["both", "forward", "backward"],
+                    default="both",
+                ),
+                io.Int.Input(
+                    "start_frame_index",
+                    default=0,
+                    min=0,
+                    max=10**5,
+                    step=1,
+                ),
+                io.Int.Input(
+                    "max_frames_to_track",
+                    default=-1,
+                    min=-1,
+                    tooltip="Advanced: Max frames to process (-1 for all)"
+                ),
+                io.Boolean.Input(
+                    "close_after_propagation",
+                    default=True,
+                    tooltip="Close the session after propagation"
+                ),
+                io.Boolean.Input(
+                  "keep_model_loaded",
+                  default=False,
+                ),
+                io.Custom(io_type="EASY_SAM3_EXTRA_CONFIG").Input(
+                    "extra_config",
+                    display_name="SAM3 Model Config",
+                    tooltip="Extra configuration for the SAM3 model",
+                    optional=True,
+                ),
+                io.String.Input(
+                  "positive_coords",
+                  display_name="positive_coords",
+                  tooltip="Positive click coordinates as JSON: '[{\"x\": 50, \"y\": 120}]'",
+                  optional=True,
+                  force_input=True,
+                ),
+                io.String.Input(
+                    "negative_coords",
+                    display_name="negative_coords",
+                    tooltip="Negative click coordinates as JSON: '[{\"x\": 150, \"y\": 300}]'",
+                    optional=True,
+                    force_input=True,
+                ),
+                io.BBOX.Input(
+                    "bbox",
+                    display_name="bbox",
+                    optional=True,
+                    tooltip="Bounding box as (x_min, y_min, x_max, y_max) or (x, y, width, height) tuple. Compatible with KJNodes Points Editor bbox output."
+                ),
+                io.Boolean.Input(
+                    "individual_objects",
+                    default=False,
+                    tooltip="If True, treat each bounding box as a separate object to track (IDs increment from object_id)."
+                ),
+            ],
+            outputs=[
+                io.Mask.Output(
+                    "output_masks",
+                    display_name="masks",
+                    tooltip="Tracked segmentation masks for all frames",
+                ),
+                io.String.Output(
+                    "session_id_output",
+                    display_name="session_id",
+                ),
+                io.Custom(io_type="EASY_SAM3_OBJECTS_OUTPUT").Output(
+                    "objects",
+                    display_name="objects"
+                ),
+                io.Mask.Output(
+                    "obj_masks",
+                    display_name="obj_masks"
+                )
+            ]
+        )
+
+
+    @classmethod
+    def execute(cls, sam3_model, video_frames, prompt, frame_index, object_id, score_threshold_detection, new_det_thresh, propagation_direction, start_frame_index=0, max_frames_to_track=-1, close_after_propagation=True,  keep_model_loaded=False, session_id=None, extra_config=None, positive_coords=None, negative_coords=None,
+                 bbox=None, individual_objects=False) -> io.NodeOutput:
+        offload_device = mm.unet_offload_device()
+
+        video_predictor = sam3_model.get("model", None)
+        device = sam3_model.get("device", torch.device("cpu"))
+        dtype = sam3_model.get("dtype", torch.float32)
+        segmentor = sam3_model.get("segmentor", None)
+        B, H, W, _ = video_frames.shape
+
+        if video_predictor is None or segmentor != "video":
+            raise ValueError("Invalid SAM3 model. Please load a SAM3 model in 'video' mode")
+
+        if frame_index > B - 1:
+            logger.info(f"Frame index {frame_index} is out of bounds, setting to last frame")
+            frame_index = B - 1
+        if start_frame_index > B:
+            logger.info(f"Last Frame index {frame_index} is out of bounds, setting to last frame")
+            start_frame_index = B
+
+        # Set video model config
+        video_predictor.model.score_threshold_detection = score_threshold_detection
+        video_predictor.model.new_det_thresh = new_det_thresh
+
+        # Set default values for video model parameters
+        video_predictor.model.assoc_iou_thresh = 0.1
+        video_predictor.model.det_nms_thresh = 0.1
+        video_predictor.model.hotstart_delay = 15
+        video_predictor.model.hotstart_unmatch_thresh = 8
+        video_predictor.model.hotstart_dup_thresh = 8
+        video_predictor.model.suppress_unmatched_only_within_hotstart = True
+        video_predictor.model.min_trk_keep_alive = -1
+        video_predictor.model.max_trk_keep_alive = 30
+        video_predictor.model.init_trk_keep_alive = 30
+        video_predictor.model.suppress_overlapping_based_on_recent_occlusion_threshold = 0.7
+        video_predictor.model.suppress_det_close_to_boundary = False
+        video_predictor.model.fill_hole_area = 16
+        video_predictor.model.recondition_every_nth_frame = 16
+        video_predictor.model.masklet_confirmation_enable = False
+        video_predictor.model.decrease_trk_keep_alive_for_empty_masklets = False
+        video_predictor.model.image_size = 1008
+
+        # Override with extra_config if provided
+        if extra_config is not None and isinstance(extra_config, dict):
+            logger.info(f"Applying extra config: {extra_config}")
+            for key, value in extra_config.items():
+                if hasattr(video_predictor.model, key):
+                    setattr(video_predictor.model, key, value)
+                    logger.debug(f"Set {key} = {value}")
+                else:
+                    logger.warning(f"Model does not have attribute: {key}")
+
+        # Start session
+        video_pil = tensor_to_pil(video_frames)
+        response = video_predictor.handle_request(
+            request=dict(
+                type="start_session",
+                resource_path=video_pil,
+                session_id=session_id
+            )
+        )
+
+        session_id = response.get("session_id", None)
+        if session_id is None:
+            raise ValueError("Failed to start video prediction session")
+
+        # Switch model to main device
+        video_predictor.model.to(device)
+
+        autocast_condition = not mm.is_device_mps(device)
+        with torch.autocast(mm.get_autocast_device(device), dtype=dtype) if autocast_condition else nullcontext():
+
+            # Parse inputs with bounds checking
+            pos_points, pos_count, pos_errors = parse_points(positive_coords, video_frames.shape)
+            neg_points, neg_count, neg_errors = parse_points(negative_coords, video_frames.shape)
+            # Combine points for refinement
+            points = None
+            point_labels = None
+            if pos_points is not None and neg_points is not None:
+                points = pos_points + neg_points
+                point_labels = [1] * pos_count + [0] * neg_count
+            elif pos_points is not None:
+                points = pos_points
+                point_labels = [1] * pos_count
+            elif neg_points is not None:
+                points = neg_points
+                point_labels = [0] * neg_count
+
+            # --- CUSTOM BBOX PARSING START ---
+            bounding_boxes_list = []
+            if bbox is not None:
+                # Handle various BBOX formats (List of Dicts, List of Lists, Single List)
+                raw_boxes = bbox
+                
+                # Check if it is a batch of lists (e.g. from previous nodes handling batches)
+                # If bbox[0] is a list and len(bbox) == B, it might be per-frame.
+                is_batch_structure = isinstance(raw_boxes, list) and len(raw_boxes) > 0 and isinstance(raw_boxes[0], list)
+                
+                if is_batch_structure and len(raw_boxes) > frame_index:
+                    # If we have a structure that matches video frames, pick the one for the start frame
+                    current_frame_boxes = raw_boxes[frame_index]
+                    logger.info(f"Picked bounding boxes for frame index {frame_index} from batch input")
+                else:
+                    # Otherwise assume the input is just a flat list of boxes for the target frame
+                    current_frame_boxes = raw_boxes
+
+                # Parse the specific boxes
+                if current_frame_boxes:
+                    for box in current_frame_boxes:
+                        parsed_box = None
+                        if isinstance(box, dict):
+                            # KJNodes / Masquerade format
+                            if 'startX' in box:
+                                parsed_box = [box['startX'], box['startY'], box['endX'], box['endY']]
+                            elif 'x' in box and 'w' in box:
+                                parsed_box = [box['x'], box['y'], box['x'] + box['w'], box['y'] + box['h']]
+                        elif isinstance(box, (list, tuple)) and len(box) >= 4:
+                            # [x1, y1, x2, y2]
+                            parsed_box = list(box[:4])
+                        
+                        if parsed_box:
+                            bounding_boxes_list.append(parsed_box)
+            # --- CUSTOM BBOX PARSING END ---
+
+            # Add Prompt(s)
+            
+            # Case 1: Individual Objects (Separate tracking for each box)
+            if individual_objects and len(bounding_boxes_list) > 0:
+                logger.info(f"Adding {len(bounding_boxes_list)} separate objects from bounding boxes")
+                for i, single_box in enumerate(bounding_boxes_list):
+                    # Points are applied only to the first object to avoid ambiguity unless logic is expanded
+                    current_points = points if i == 0 else None
+                    current_labels = point_labels if i == 0 else None
+                    current_obj_id = object_id + i
+                    
+                    video_predictor.handle_request(
+                        request=dict(
+                            type="add_prompt",
+                            session_id=session_id,
+                            frame_index=frame_index,
+                            text=prompt if prompt else None,
+                            bounding_boxes=[single_box],
+                            bounding_box_labels=[1],
+                            points=current_points,
+                            point_labels=current_labels,
+                            obj_id=current_obj_id
+                        )
+                    )
+            
+            # Case 2: Single Object (Original behavior or single box)
+            else:
+                final_boxes = bounding_boxes_list if len(bounding_boxes_list) > 0 else None
+                final_box_labels = [1] * len(final_boxes) if final_boxes else None
+                
+                video_predictor.handle_request(
+                    request=dict(
+                        type="add_prompt",
+                        session_id=session_id,
+                        frame_index=frame_index,
+                        text=prompt if prompt else None,
+                        bounding_boxes=final_boxes,
+                        bounding_box_labels=final_box_labels,
+                        points=points,
+                        point_labels=point_labels,
+                        obj_id=object_id
+                    )
+                )
+
+            # Start to propagate
+            # Output Masks
+            output_masks = torch.zeros((B, H, W), dtype=torch.float32)
+
+            # Initialize progress bar
+            pbar = comfy.utils.ProgressBar(B)
+            processed_frames = 0
+
+            object_outputs = {
+                "obj_ids":None,
+                "obj_masks":[]
+            }
+            # Use dictionary to store object_masks by frame_idx to handle non-sequential frame processing
+            object_masks_dict = {}
+
+            for response in video_predictor.handle_stream_request(
+                request=dict(
+                    type="propagate_in_video",
+                    session_id=session_id,
+                    propagation_direction=propagation_direction,
+                    start_frame_index=start_frame_index,
+                    max_frame_num_to_track=max_frames_to_track if max_frames_to_track != -1 else None,
+                )
+            ):
+                frame_idx = response.get("frame_index", 0)
+                outputs = response.get("outputs", {})
+                obj_ids = outputs.get("out_obj_ids", None)
+                if obj_ids is not None:
+                    object_outputs["obj_ids"] = obj_ids
+                if outputs:
+                    if "out_binary_masks" in outputs:
+                        mask = outputs["out_binary_masks"]
+                        # Store mask for this frame
+                        if mask.shape[0] > 0:
+                            # Store numpy array in object_masks_dict for consistent processing
+                            object_masks_dict[frame_idx] = mask
+
+                            merged_mask = np.any(mask, axis=0).astype(np.float32)
+                            frame_masks = torch.from_numpy(merged_mask)
+                            output_masks[frame_idx] = frame_masks
+                        else:
+                            object_masks_dict[frame_idx] = np.zeros((1, H, W), dtype=np.float32)
+                    else:
+                        object_masks_dict[frame_idx] = np.zeros((1, H, W), dtype=np.float32)
+
+                # Update progress bar
+                processed_frames += 1
+                pbar.update_absolute(processed_frames, B)
+
+            # close session
+            if close_after_propagation:
+                video_predictor.handle_request(
+                    request=dict(
+                        type="close_session",
+                        session_id=session_id,
+                    )
+                )
+
+            # Switch model back to offload device
+            if not keep_model_loaded:
+                video_predictor.model.to(offload_device)
+                mm.soft_empty_cache()
+
+            # When closing the session and unloading the video memory, the predictor will shut down.
+            if not keep_model_loaded and close_after_propagation:
+                video_predictor.shutdown()
+
+        # Convert object_masks_dict to ordered list and pad to have same number of objects across all frames
+        if len(object_masks_dict) > 0:
+            # Find the maximum number of objects across all frames
+            max_num_objects = max(mask.shape[0] for mask in object_masks_dict.values())
+            
+            # Sort objects by their horizontal position (left to right)
+            # Calculate the center x-coordinate for each object based on their first appearance
+            obj_ids_array = object_outputs.get("obj_ids", None)
+            if obj_ids_array is not None and len(obj_ids_array) > 0:
+                # Track first appearance and position for each object index
+                object_first_positions = {}  # obj_idx -> (frame_idx, center_x)
+                
+                # Iterate through all frames to find first appearance of each object
+                for frame_idx in sorted(object_masks_dict.keys()):
+                    masks = object_masks_dict[frame_idx]
+                    if masks.shape[0] > 0:
+                        for obj_idx in range(masks.shape[0]):
+                            if obj_idx not in object_first_positions:
+                                mask = masks[obj_idx]
+                                # Find bounding box of the mask
+                                cols = np.any(mask > 0, axis=0)
+                                
+                                if np.any(cols):
+                                    # Calculate center x-coordinate
+                                    col_indices = np.nonzero(cols)[0]
+                                    center_x = np.mean(col_indices)
+                                    object_first_positions[obj_idx] = (frame_idx, center_x)
+                                else:
+                                    # Empty mask, place at far right
+                                    object_first_positions[obj_idx] = (frame_idx, W)
+                
+                if len(object_first_positions) > 0:
+                    # Sort by x-coordinate (left to right), then by frame index for ties
+                    sorted_obj_indices = sorted(
+                        object_first_positions.keys(),
+                        key=lambda idx: (object_first_positions[idx][1], object_first_positions[idx][0])
+                    )
+
+                    # Create mapping from old index to new index
+                    old_to_new_idx = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted_obj_indices)}
+
+                    # Reorder obj_ids according to sorted indices, robust to length mismatches
+                    if isinstance(obj_ids_array, np.ndarray):
+                        try:
+                            # Create an array of length max_num_objects filled with -1 of same dtype
+                            fill_val = -1
+                            try:
+                                fill_val = obj_ids_array.dtype.type(-1)
+                            except Exception:
+                                fill_val = -1
+                            sorted_obj_ids = np.full((max_num_objects,), fill_val, dtype=obj_ids_array.dtype)
+                            for new_pos, old_idx in enumerate(sorted_obj_indices):
+                                if old_idx < obj_ids_array.shape[0]:
+                                    sorted_obj_ids[new_pos] = obj_ids_array[old_idx]
+                        except Exception:
+                            sorted_obj_ids = obj_ids_array
+                    elif isinstance(obj_ids_array, list):
+                        sorted_obj_ids = [None] * max_num_objects
+                        for new_pos, old_idx in enumerate(sorted_obj_indices):
+                            if old_idx < len(obj_ids_array):
+                                sorted_obj_ids[new_pos] = obj_ids_array[old_idx]
+                    else:
+                        sorted_obj_ids = obj_ids_array
+
+                    object_outputs["obj_ids"] = sorted_obj_ids
+                    logger.info(f"Sorted {len(sorted_obj_indices)} objects by horizontal position (left to right)")
+
+                    # Apply same sorting to all frames' masks. Build per-frame masks with length max_num_objects
+                    sorted_object_masks_dict = {}
+                    for frame_idx, masks in object_masks_dict.items():
+                        if masks.shape[0] > 0:
+                            num_objects_in_frame = masks.shape[0]
+                            # Create target array sized to max_num_objects and fill with zeros
+                            sorted_masks = np.zeros((max_num_objects, masks.shape[1], masks.shape[2]), dtype=masks.dtype)
+                            # For each old index present in this frame, place it at its new index
+                            for old_idx in range(num_objects_in_frame):
+                                if old_idx in old_to_new_idx:
+                                    new_idx = old_to_new_idx[old_idx]
+                                    if 0 <= new_idx < max_num_objects:
+                                        sorted_masks[new_idx] = masks[old_idx]
+                            sorted_object_masks_dict[frame_idx] = sorted_masks
+                        else:
+                            # Create empty masks with shape (max_num_objects, H, W)
+                            sorted_object_masks_dict[frame_idx] = np.zeros((max_num_objects, H, W), dtype=np.float32)
+
+                    object_masks_dict = sorted_object_masks_dict
+
+            # Create ordered list of masks by frame index, ensuring all B frames are included
+            ordered_obj_masks = []
+            padded_masks = []
+            for frame_idx in range(B):
+                if frame_idx in object_masks_dict:
+                    mask = object_masks_dict[frame_idx]  # numpy array
+                    num_objects = mask.shape[0]
+                    if num_objects < max_num_objects:
+                        # Pad with zero masks (numpy for obj_masks)
+                        padding = np.zeros((max_num_objects - num_objects, H, W), dtype=np.float32)
+                        padded_mask = np.concatenate([mask, padding], axis=0)
+                        ordered_obj_masks.append(padded_mask)
+                        padded_masks.append(torch.from_numpy(padded_mask))
+                    else:
+                        ordered_obj_masks.append(mask)
+                        padded_masks.append(torch.from_numpy(mask))
+                else:
+                    # Frame not processed, add empty mask with correct shape
+                    empty_mask = np.zeros((max_num_objects, H, W), dtype=np.float32)
+                    ordered_obj_masks.append(empty_mask)
+                    padded_masks.append(torch.zeros((max_num_objects, H, W)))
+
+            # Now stack all B frames
+            object_masks = torch.stack(padded_masks, dim=0)
+            object_outputs["obj_masks"] = ordered_obj_masks
+        else:
+            # No masks detected, create empty tensor
+            object_masks = torch.zeros((B, 1, H, W))
+            object_outputs["obj_masks"] = []
+
+        return io.NodeOutput(output_masks, session_id, object_outputs, object_masks)
