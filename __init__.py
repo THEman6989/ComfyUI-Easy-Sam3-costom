@@ -14,6 +14,7 @@ class Sam3Extension(ComfyExtension):
             Sam3GetObjectMask,
             StringToBBox,
             FramesEditor,
+            Sam3VideoSegmentation_v2,
         ]
 
 async def comfy_entrypoint() -> Sam3Extension:
