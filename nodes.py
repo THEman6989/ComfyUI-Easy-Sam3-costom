@@ -2106,3 +2106,137 @@ class Sam3VideoSegmentation_v2(io.ComfyNode):
             object_outputs["obj_masks"] = []
 
         return io.NodeOutput(output_masks, session_id, object_outputs, object_masks)
+
+
+class FramesEditor_v2(io.ComfyNode):
+    state = {
+        "last_images_hash": None,
+        "cached_preview": None,
+    }
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="easy framesEditor_v2",
+            display_name="Frames Editor v2 (Batch Friendly)",
+            category="EasyUse/Sam3",
+            description="SAM3 Editor Node that preserves frames and points across batches",
+            inputs=[
+                io.Image.Input(
+                    "images",
+                    tooltip="Input images for SAM3 Editor"
+                ),
+                io.String.Input(
+                    "info",
+                    default="",
+                ),
+                io.Float.Input(
+                    "preview_rescale",
+                    default=1.0,
+                    min=0.05,
+                    max=1.0,
+                    step=0.05,
+                    tooltip="Scale factor for preview image (coordinates will be converted back to original scale)"
+                )
+            ],
+            outputs=[
+                io.String.Output(
+                    "positive_coords",
+                    display_name="positive_coords",
+                ),
+                io.String.Output(
+                    "negative_coords",
+                    display_name="negative_coords",
+                ),
+                io.BBOX.Output(
+                    "bboxes",
+                    display_name="bboxes",
+                ),
+                io.Int.Output(
+                    "frame_index",
+                    display_name="frame_index",
+                )
+            ],
+            is_output_node=True,
+        )
+
+    @classmethod
+    def execute(cls, images, info, preview_rescale=1.0) -> io.NodeOutput:
+        positive_coords = None
+        negative_coords = None
+        bboxes = None
+        frame_index = 0
+        
+        needs_scaling = preview_rescale > 0 and preview_rescale < 1.0
+        scale_factor = 1.0 / preview_rescale if needs_scaling else 1.0
+        
+        if info != '':
+            try:
+                info = json.loads(info)
+            except json.JSONDecodeError:
+                info = None
+            
+            if info is not None:
+                positive_coords = info.get("positive_coords", None)
+                negative_coords = info.get("negative_coords", None)
+                box = info.get("bbox", None)
+                frame_index = info.get("frame_index", 0)
+                
+                if needs_scaling:
+                    if positive_coords is not None:
+                        positive_coords = [{"x": coord["x"] * scale_factor, "y": coord["y"] * scale_factor} for coord in positive_coords]
+                    if negative_coords is not None:
+                        negative_coords = [{"x": coord["x"] * scale_factor, "y": coord["y"] * scale_factor} for coord in negative_coords]
+                
+                bboxes = []
+                if box is not None and len(box) > 0:
+                    for i in box:
+                        if needs_scaling:
+                            x = i['x'] * scale_factor
+                            y = i['y'] * scale_factor
+                            w = i['w'] * scale_factor
+                            h = i['h'] * scale_factor
+                        else:
+                            x = i['x']
+                            y = i['y']
+                            w = i['w']
+                            h = i['h']
+                        bboxes.append([x, y, x + w, y + h])
+
+                if positive_coords is not None:
+                    positive_coords = json.dumps(positive_coords, ensure_ascii=False)
+                if negative_coords is not None:
+                    negative_coords = json.dumps(negative_coords, ensure_ascii=False)
+
+        preview_images = images
+        if needs_scaling:
+            _, height, width, _ = images.shape
+            new_height = int(height * preview_rescale)
+            new_width = int(width * preview_rescale)
+            
+            pil_images = tensor_to_pil(images)
+            resized_pil = [img.resize((new_width, new_height), Image.LANCZOS) for img in pil_images]
+            preview_images = pil_to_tensor(resized_pil)
+        
+        images_hash = hashlib.md5(preview_images.cpu().numpy().tobytes()).hexdigest()
+        rescale_hash = f"{images_hash}_{preview_rescale}"
+        
+        if 'last_images_hash' in cls.state and cls.state['last_images_hash'] == rescale_hash:
+            preview_str = cls.state['cached_preview']
+            is_init = False
+        else:
+            preview = ui.ImageSaveHelper.save_images(
+                preview_images,
+                filename_prefix="ComfyUI_temp_" + ''.join(random.choice("abcdefghijklmnopqrstupvxyz") for _ in range(5)),
+                folder_type=FolderType.temp,
+                cls=cls,
+                compress_level=4,
+            )
+            preview_str = json.dumps(preview, ensure_ascii=False)
+            cls.state['last_images_hash'] = rescale_hash
+            cls.state['cached_preview']= preview_str
+            is_init = True
+
+        return io.NodeOutput(positive_coords, negative_coords, bboxes, frame_index, ui={"preview": [{"preview_str": preview_str, "is_init": is_init}]})
+
+
