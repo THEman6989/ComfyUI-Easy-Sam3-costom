@@ -64,7 +64,7 @@ app.registerExtension({
     name: "Comfy.EasyUse.FramesEditor",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         const nodeName = nodeData.name;
-        if (nodeName === "easy framesEditor"){
+        if (nodeName === "easy framesEditor" || nodeName === "easy framesEditor_v2"){
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 const container = document.createElement("div");
                 container.style.cssText = "position: relative; width: 100%; height: 100%; background: #0f1011; overflow: hidden; box-sizing: border-box;border-radius:4px; margin: 0; padding: 0; display: flex; flex-direction: column;";
@@ -282,23 +282,35 @@ app.registerExtension({
                     }
                 });
 
-                // Handle image input changes
+                /// Handle image input changes
                 chainCallback(this, "onExecuted", function(message) {
                     if (message.preview && message.preview[0]) {
                         const {preview_str, is_init} = message.preview[0];
                         const previewData = JSON.parse(preview_str);
                         this.canvasWidget.previewFrames = previewData;
+                        
                         // Update tracker
                         if(is_init){
-                            if(this.canvasWidget.frameIndex>=previewData.length-1){
-                                this.canvasWidget.frameIndex = 0;
-                                this.restoreState({ positivePoints: [], negativePoints: [], bboxes: [] });
-                                this.updateWidgetValue();
-                                this.canvasWidget.history = [];
-                                this.canvasWidget.historyIndex = -1;
-                                this.updateUndoRedoUI();
+                            if (nodeName === "easy framesEditor") {
+                                // Originales Verhalten: Lösche alles, wenn das Video neu geladen wird
+                                if(this.canvasWidget.frameIndex >= previewData.length - 1){
+                                    this.canvasWidget.frameIndex = 0;
+                                    this.restoreState({ positivePoints: [], negativePoints: [], bboxes: [] });
+                                    this.updateWidgetValue();
+                                    this.canvasWidget.history = [];
+                                    this.canvasWidget.historyIndex = -1;
+                                    this.updateUndoRedoUI();
+                                }
+                            } else if (nodeName === "easy framesEditor_v2") {
+                                // Neues Verhalten (V2): Punkte behalten! 
+                                // Frame-Index nur anpassen, falls das neue Video zu kurz für den aktuellen Frame ist.
+                                if(this.canvasWidget.frameIndex >= previewData.length){
+                                    this.canvasWidget.frameIndex = Math.max(0, previewData.length - 1);
+                                    this.updateWidgetValue();
+                                }
                             }
                         }
+                        
                         if (previewData.length > 1) {
                             this.canvasWidget.tracker.style.display = "flex";
                             slider.max = previewData.length - 1;
@@ -311,23 +323,21 @@ app.registerExtension({
 
                         const img = new Image();
                         img.onload = () => {
-                            // console.log(`Image loaded: ${img.width}x${img.height}`);
                             this.canvasWidget.image = img;
                             canvas.width = img.width;
                             canvas.height = img.height;
-                            // console.log(`[Canvas resized to: ${canvas.width}x${canvas.height}`);
                             this.redrawCanvas();
                         };
                         
-                        if(previewData?.length>0){
+                        if(previewData?.length > 0){
+                            // Sicherheitshalber Clamp für den Index
                             if (this.canvasWidget.frameIndex >= previewData.length) {
-                                this.canvasWidget.frameIndex = 0;
-                                slider.value = 0;
+                                this.canvasWidget.frameIndex = Math.max(0, previewData.length - 1);
+                                slider.value = this.canvasWidget.frameIndex;
                                 this.canvasWidget.slider = slider;
                             }
                             img.src = getRealURL(previewData[this.canvasWidget.frameIndex]);
                         }
-                    
                     }
                 });
 
